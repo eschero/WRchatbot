@@ -1,18 +1,30 @@
 import os
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
+from time import sleep
+from packaging import version
 import openai
+from openai import OpenAI
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
 import asyncio
+
+# Controlliamo che la versione di OpenAI sia corretta
+required_version = version.parse("1.1.1")
+current_version = version.parse(openai.__version__)
+OPENAI_API_KEY = os.environ['OPENAI_API_KEY']
+if current_version < required_version:
+  raise ValueError(f"Error: OpenAI version {openai.__version__}"
+                   " is less than the required version 1.1.1")
+else:
+  print("OpenAI version is compatible.")
 
 # Inizializziamo l'app FastAPI
 app = FastAPI()
 
-# Impostiamo la chiave API e l'organizzazione
-openai.api_key = os.getenv('OPENAI_API_KEY')
-openai.organization = os.getenv('OPENAI_ORG_ID')
+# Inizializziamo il client di OpenAI
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Carichiamo l'ID dell'assistente dalle variabili di ambiente
-assistant_id = os.getenv('ASSISTANT_ID')
+assistant_id = os.environ['ASSISTANT_ID']
 
 # Definiamo il modello di richiesta per la chat
 class ChatRequest(BaseModel):
@@ -22,63 +34,59 @@ class ChatRequest(BaseModel):
 # Inizializziamo una conversazione
 @app.get('/start')
 async def start_conversation():
-    print("Starting a new conversation...")
-    # Crea un nuovo thread con l'intestazione per usare Assistants v2
-    thread = openai.Thread.create(headers={"OpenAI-Beta": "assistants=v2"})
-    print(f"New thread created with ID: {thread['id']}")
-    return {"thread_id": thread['id']}
+  print("Starting a new conversation...")
+  thread = client.beta.threads.create()
+  print(f"New thread created with ID: {thread.id}")
+  return {"thread_id": thread.id}
 
 # Gestiamo il messaggio di chat
 @app.post('/chat')
 async def chat(chat_request: ChatRequest):
-    thread_id = chat_request.thread_id
-    user_input = chat_request.message
+  thread_id = chat_request.thread_id
+  user_input = chat_request.message
 
-    # Controlliamo che l'ID della conversazione sia stato fornito
-    if not thread_id:
-        raise HTTPException(status_code=400, detail="Missing thread_id")
+  # Controlliamo che l'ID della conversazione sia stato fornito
+  if not thread_id:
+    print("Error: Missing thread_id")
+    raise HTTPException(status_code=400, detail="Missing thread_id")
 
-    print(f"Received message: {user_input} for thread ID: {thread_id}")
+  print(f"Received message: {user_input} for thread ID: {thread_id}")
 
-    # Inseriamo il messaggio dell'utente nella conversazione
-    openai.ThreadMessage.create(
-        thread_id=thread_id,
-        role="user",
-        content=user_input,
-        headers={"OpenAI-Beta": "assistants=v2"}
-    )
+  # Inseriamo il messaggio dell'utente nella conversazione
+  client.beta.threads.messages.create(thread_id=thread_id,
+                                      role="user",
+                                      content=user_input)
 
-    # Creiamo la run per l'assistente
-    run = openai.ThreadRun.create(
-        thread_id=thread_id,
-        assistant_id=assistant_id,
-        headers={"OpenAI-Beta": "assistants=v2"}
-    )
+  # Creiamo la run per l'assistente
+  run = client.beta.threads.runs.create(thread_id=thread_id,
+                                        assistant_id=assistant_id)
   
-    end = False
+  end = False
 
-    # Loop per controllare lo stato della run
-    while not end:
-        run_status = openai.ThreadRun.retrieve(
-            thread_id=thread_id,
-            run_id=run['id'],
-            headers={"OpenAI-Beta": "assistants=v2"}
-        )
-        print(f"Run status: {run_status['status']}")
+  # Polling per controllare lo stato della run 
+  while not end:
+    # Controlliamo lo stato della run
+    run_status = client.beta.threads.runs.retrieve(thread_id=thread_id,
+                                                   run_id=run.id)
+    print(f"Run status: {run_status.status}")
 
-        # Gestione dello stato della run
-        if run_status['status'] in ['completed', 'cancelling', 'requires_action', 'cancelled', 'expired', 'failed']:
-            end = True
+    if run_status.status == 'completed':
+      end = True
+     
+    elif run_status.status == "cancelling" or run_status.status == "requires_action" or run_status.status == "cancelled" or run_status.status == "expired":
+      end = True
 
-        await asyncio.sleep(1)
+    elif run_status.status == "failed":
+      print(run.last_error)
+      end = True
+    
+    await asyncio.sleep(1)  
 
-    # Recuperiamo i messaggi della conversazione
-    messages = openai.ThreadMessage.list(
-        thread_id=thread_id,
-        headers={"OpenAI-Beta": "assistants=v2"}
-    )
-    response = messages['data'][0]['content'][0]['text']['value']
+  # Recuperiamo i messaggi della conversazione
+  messages = client.beta.threads.messages.list(thread_id=thread_id)
+  # Recuperiamo il testo della risposta
+  response = messages.data[0].content[0].text.value
   
-    print(f"Assistant response: {response}")
+  print(f"Assistant response: {response}")
 
-    return {"response": response}
+  return {"response": response}
